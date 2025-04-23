@@ -1,0 +1,767 @@
+---
+title: "01-QC"
+author: "Pawan Bhat"
+date: "2025-04-05"
+output: html_document
+---
+## Introduction
+
+Standard Ferrell lab scRNA-seq QC pipeline. Load functions and create project directory. Move Cell Ranger outputs into data directory. If multiple samples, then change multiple_samples to TRUE. Wrapper functions at end of document.
+
+#Setup
+
+```{r setup, include=FALSE, echo=FALSE}
+project_folder <- project_folder
+setwd(project_folder)
+
+results_folder <- results_folder
+
+data_folder <- data_folder
+
+#devtools::install_github("ayshwaryas/ddqc_R")
+#remotes::install_github("cvarrichio/Matrix.utils")
+libraries <- c("SeuratObject", "Seurat", "patchwork", "dplyr", "ggplot2",  
+               "SoupX", "cowplot", "parallel", "Matrix", "tidyverse",
+               "reshape2", "SingleCellExperiment", "RColorBrewer", 'hdf5r', 'openxlsx')
+
+
+lapply(libraries, library, character.only = TRUE)
+# dir.create(project_folder)
+# dir.create(results_folder)
+# dir.create(objects_folder)
+```
+
+
+
+
+## Ambient RNA removal via SoupX
+
+```{r SoupX}
+#Load H5 Files
+
+
+TenX_files <- LoadTenXData(data_folder,  multiple_samples = T)
+
+subdirectory <- paste0(results_folder, "sample_",1:length(TenX_files[,1]))
+lapply(subdirectory, dir.create)
+
+subdirectory <- list.dirs(results_folder, recursive = F)
+subdirectory <- paste0(subdirectory, "/soup/")
+lapply(subdirectory, dir.create)
+
+lapply(subdirectory, FilterAmbient,  TenX_files = TenX_files, remove_ribo = T)
+
+```
+
+
+## Filter Genes and Cells (Supervised via QC plot inspection)
+
+```{r Gene and Cell filtering}
+
+
+subdirectory <- list.dirs(results_folder, recursive = F)
+subdirectory <- paste0(subdirectory,'/filtering/')
+lapply(subdirectory, dir.create)
+
+#Gene filtering over multiple samples
+lapply(subdirectory, FilterGenes, seu_obj = "MitoCutNoRibo_Out.rds", results_folder = results_folder, n_genes_filtered = 10)
+
+#Cell filtering over multiple samples (inspect the QC vln plots to filter cells in supervised fashion)
+#mitochondrial percentage = 50
+#nfeatures = 0- 6000
+#ncount 0 - 50000
+FilterCells(subdirectory = subdirectory[1], seu_obj = "GeneFiltered.rds", results_folder = results_folder)
+
+#Remove negative HTO barcodes 
+lapply(subdirectory, RemoveNegDrops, seu_obj = "CellFiltered.rds", results_folder = results_folder)
+
+```
+
+
+## Wrapper Functions for QC
+
+```{r functions}
+
+#Functions
+
+#Useful Functions for Saving Objects, Plots, Counts, and Reads:
+# Define a function to save the plot
+save_plot <- function(plot_obj, data_obj, func_name, filepath) {
+  # Generate filename by compounding object name and function name
+  filename <- paste0(deparse(substitute(data_obj)), "_", func_name, ".png")
+  full_path <- file.path(filepath, filename)
+  
+  # Save the plot
+  ggsave(filename = full_path, plot = plot_obj)
+  message("Plot saved to: ", full_path)
+}
+
+benchmark_seurat_data <- function(seurat_obj, subdirectory) {
+  # File path setup
+  temp_str <- gsub(".*?(sample+)", "\\1", subdirectory)
+  i <- gsub(".*?([0-9]+).*", "\\1", temp_str)
+  benchmark_filepath <- paste0(gsub('sample.*', "", subdirectory),"sample_",i,"/Benchmark")
+  dir.create(benchmark_filepath)
+  
+  # Obtain the name of the Seurat object
+  obj_name <- deparse(substitute(seurat_obj))
+  
+  #Benchmark unique number of genes
+  obj_counts_value <- length(rownames(seurat_obj))
+  
+  if (file.exists(paste0(benchmark_filepath,'/Genes.xlsx'))) {
+    existing_counts_data <- as.data.frame(read.xlsx(paste0(benchmark_filepath,'/Genes.xlsx')))
+    # Set the count value
+    existing_counts_data[1, obj_name] <- obj_counts_value
+    
+    # Save the updated data
+    write.xlsx(existing_counts_data, paste0(benchmark_filepath,'/Genes.xlsx'))
+    
+  } else {
+    existing_counts_data <- data.frame(matrix(ncol = 1, nrow = 1))
+    colnames(existing_counts_data) <- obj_name
+    
+    # Set the count value
+    existing_counts_data[1, obj_name] <- obj_counts_value
+    
+    # Save the updated data
+    write.xlsx(existing_counts_data, paste0(benchmark_filepath,'/Genes.xlsx'))
+    
+  }
+  
+  # Benchmark Cell Counts
+  obj_cells_value <- length(colnames(seurat_obj))
+  
+  if (file.exists(paste0(benchmark_filepath,'/Cells.xlsx'))) {
+    existing_cells_data <- as.data.frame(read.xlsx(paste0(benchmark_filepath,'/Cells.xlsx')))
+    # Set the reads value
+    existing_cells_data[1, obj_name] <- obj_cells_value
+    
+    # Save the updated data
+    write.xlsx(existing_cells_data, paste0(benchmark_filepath,'/Cells.xlsx'))
+    
+  }else{
+    existing_cells_data <- data.frame(matrix(ncol = 1, nrow = 1))
+    colnames(existing_cells_data) <- obj_name
+    
+    # Set the reads value
+    existing_cells_data[1, obj_name] <- obj_cells_value
+    
+    # Save the updated data
+    write.xlsx(existing_cells_data, paste0(benchmark_filepath,'/Cells.xlsx'))
+  }
+  
+  # Benchmark Total Features (UMIs)
+  obj_features_value <- sum(seurat_obj$nFeature_RNA)
+  
+  # If the data frame is empty, initialize it
+  if (file.exists(paste0(benchmark_filepath,'/Features.xlsx'))) {
+    existing_features_data <- as.data.frame(read.xlsx(paste0(benchmark_filepath,'/Features.xlsx')))
+    # Set the reads value
+    existing_features_data[1, obj_name] <- obj_features_value
+    
+    # Save the updated data
+    write.xlsx(existing_features_data, paste0(benchmark_filepath,'/Features.xlsx'))
+    
+  }else{
+    existing_features_data <- data.frame(matrix(ncol = 1, nrow = 1))
+    colnames(existing_features_data) <- obj_name
+    
+    # Set the reads value
+    existing_features_data[1, obj_name] <- obj_features_value
+    
+    # Save the updated data
+    write.xlsx(existing_features_data, paste0(benchmark_filepath,'/Features.xlsx'))
+  }
+  
+}
+
+save_to_objects_folder <- function(obj, obj_name, subdirectory) {
+  # Generate the full file path for the object
+  file_path <- paste0(subdirectory, obj_name, ".rds")
+  
+  # Save the object as an RDS file
+  saveRDS(obj, file_path)
+  
+  # Provide a message to inform user of save location
+  message(paste("Object saved to:", file_path))
+}
+
+SaveSeuMetadata <- function(obj, obj_name, subdirectory ){
+  # Generate the full file path for the object
+  file_path <- paste0(subdirectory, obj_name, ".csv")
+  
+  # Extract metadata and save as a CSV file
+  metadata <- obj@meta.data
+  write.table(metadata, file = file_path)
+  
+  # Provide a message to inform user of save location
+  message(paste("Metadata saved to:", file_path))
+  
+}
+
+# Define find elbow function to calculate optimum PCS
+find_elbow <- function(seurat_obj) {
+  # Extract standard deviations of principal components (sdev)
+  sdev <- seurat_obj@reductions$pca@stdev
+  # Calculate explained variance
+  explained_var <- sdev^2 / sum(sdev^2)
+  
+  # Coordinate of the first point (starting point)
+  start_coord <- c(1, explained_var[1])
+  # Coordinate of the last point (end of the line)
+  end_coord <- c(length(explained_var), explained_var[length(explained_var)])
+  
+  # Function to get the distance of each point from the line
+  get_distance <- function(x, y, start = start_coord, end = end_coord) {
+    # Formula for point-line distance
+    abs((end[2]-start[2])*x - (end[1]-start[1])*y + end[1]*start[2] - end[2]*start[1]) / 
+      sqrt((end[2]-start[2])^2 + (end[1]-start[1])^2)
+  }
+  
+  distances <- mapply(get_distance, x = 1:length(explained_var), y = explained_var)
+  
+  # Return the index of the max distance (elbow point)
+  return(which.max(distances))
+}
+
+LoadTenXData <- function(data_folder,  multiple_samples = T){
+  
+  if(multiple_samples == T){
+    filtered_files <-list.files(path = data_folder, recursive = T, pattern = "filtered_feature_bc_matrix.h5")
+    filtered_files <- paste0(data_folder, filtered_files)
+    raw_files <- list.files(path = data_folder, recursive = T, pattern = "raw_feature_bc_matrix.h5")
+    raw_files <- paste0(data_folder, raw_files)
+    TenX_files <- data.frame(raw_files,filtered_files)
+    
+    if (length(raw_files) == length(filtered_files)){
+      print("Confirmed same number of raw and filter h5 files")
+      
+    } else {
+      print("Each filtered file does not have corresponding raw file. Please check the data folder")
+    }
+    return(TenX_files)
+    
+    
+  }else{
+    filtered_files <-list.files(path = data_folder, pattern = "filtered_feature_bc_matrix.h5")
+    filtered_files <- paste0(data_folder, filtered_files)
+    raw_files <- list.files(path = data_folder, pattern = "raw_feature_bc_matrix.h5")
+    raw_files <- paste0(data_folder, raw_files)
+    TenX_files <- data.frame(raw_files,filtered_files)
+    return(TenX_files)
+  }
+}
+
+FilterAmbient <- function(TenX_files, subdirectory, remove_ribo = T){
+  
+  temp_str <- gsub(".*?(sample+)", "\\1", subdirectory)
+  n_sample <- gsub(".*?([0-9]+).*", "\\1", temp_str)
+  TenX <- Seurat::Read10X_h5(TenX_files[n_sample,2])
+  
+  if(is.list(TenX)== T ){
+    GE <- TenX$`Gene Expression`
+    AC <- TenX$`Antibody Capture`
+    
+    
+    joint.bcs <- intersect(colnames(GE), colnames(AC))
+    
+    # Subset RNA and HTO counts by joint cell barcodes
+    GE <- GE[, joint.bcs]
+    AC <- as.matrix(AC[, joint.bcs])
+    
+    # Confirm that the HTO have the correct names
+    rownames(AC)
+    
+  }else{
+    GE <- TenX
+  }
+  
+  # Setup Seurat object
+  GE_SO <- CreateSeuratObject(counts = GE)
+  benchmark_seurat_data(GE_SO, subdirectory)
+  
+  # Normalize Data
+  GE_SO <- NormalizeData(GE_SO, normalization.method = "LogNormalize", scale.factor = 10000)
+  
+  #FindVariableFeatures, use 3000 (SCTransform Default)
+  GE_SO <- FindVariableFeatures(GE_SO, selection.method = "vst", nfeatures = 2000)
+  
+  # Visualize the top 10 highly variable genes
+  # top10 <- head(VariableFeatures(GE_SO), 10)
+  # plot1 <- FeatureScatter(GE_SO, feature1 = "nCount_RNA", feature2 = top10[1])
+  # plot2 <- FeatureScatter(GE_SO, feature1 = "nCount_RNA", feature2 = top10[2])
+  # #CombinePlots(plots = list(plot1, plot2))
+  # 
+  # Scale data
+  all.genes <- rownames(GE_SO)
+  GE_SO <- ScaleData(GE_SO, features = all.genes)
+  
+  # Run PCA
+  GE_SO <- RunPCA(GE_SO, features = VariableFeatures(object = GE_SO))
+  
+  #Find ELbow Point
+  elbow_points <- find_elbow(GE_SO)
+  elbow_points
+  
+  #Find Neighbors, Find Clusters sweep, stop with high modularity index, rerun at desired value
+  GE_SO <- FindNeighbors(GE_SO, k.param = elbow_points)
+  #GE_SO <- FindClusters(GE_SO, resolution = c(0.025, 0.05, 0.075, 0.1, 0.125, 0.15, 0.175, 0.2, 0.225, 0.25))
+  GE_SO <- FindClusters(GE_SO, resolution = 5)
+  #Six communities at modularity 0.9348
+
+  # View the PCA loadings for the top genes on PC1 and PC2
+  #VizDimLoadings(GE_SO, dims = 1:2, reduction = "pca")
+  
+  # Plot PCA dimensions
+  #DimPlot(GE_SO, reduction = "pca")
+  # 
+  # GE_SO <- RunUMAP(GE_SO, dims = 1:20, reduction = "pca")
+  # GE_SO$UMAP1 <- GE_SO@reductions$umap@cell.embeddings[,1]
+  # GE_SO$UMAP2 <- GE_SO@reductions$umap@cell.embeddings[,2]
+  
+  #Load Counts
+  filtered_data <- Read10X_h5(TenX_files[n_sample,2])
+  raw_data <- Read10X_h5(TenX_files[n_sample,1])
+  
+  if(is.list(TenX) == T){
+    filtered_data <- filtered_data$`Gene Expression`
+    raw_data <- raw_data$`Gene Expression`
+  }else{
+    filtered_data <- filtered_data
+    raw_data <- raw_data
+  }
+  
+  
+  #Verify clusters and cluster list size, must match the above
+  clusters_list <- GE_SO@meta.data$seurat_clusters
+  
+  length(rownames(filtered_data))
+  length(GE_SO@meta.data$seurat_clusters)
+  
+  sc = SoupChannel(raw_data, filtered_data, calcSoupProfile = FALSE)
+  sc = estimateSoup(sc)
+  sc = setClusters(sc, setNames(GE_SO@meta.data$seurat_clusters, colnames(filtered_data)))
+  #sc = setDR(sc, GE_SO@meta.data[colnames(sc$toc), c("UMAP1", "UMAP2")])
+  #sc = setContaminationFraction(sc, 0.2)
+  igGenes <- c("IGHA1", "IGHA2", "IGHG1", "IGHG2", "IGHG3", "IGHG4", "IGHD", "IGHE", "IGHM", 
+                "IGLC1", "IGLC2", "IGLC3", "IGLC4", "IGLC5", "IGLC6", "IGLC7", "IGKC")
+  hbGenes <-  c("HBB", "HBA2", "HBA1", "HBG1", "HBG2", "HBD", "HBE1", "HBQ1", "HBM","HBZ")
+  nonExpressedGeneList = list(HB = hbGenes, 
+                              IG = igGenes)
+  
+  useToEst = estimateNonExpressingCells(sc, nonExpressedGeneList = nonExpressedGeneList)
+  
+  sc = calculateContaminationFraction(sc, nonExpressedGeneList, useToEst = useToEst)
+  
+  out = adjustCounts(sc, roundToInt = T)
+  #plotChangeMap(sc, out, "HBA2")
+  
+  
+
+  #Create, benchmark, save SeuratObject
+  SoupOut <- CreateSeuratObject(out)
+  
+  save_to_objects_folder(SoupOut, "SoupOut", subdirectory)
+  SaveSeuMetadata(SoupOut, "SoupOut", subdirectory)
+  benchmark_seurat_data(SoupOut, subdirectory)
+  
+  #Cleanup
+  remove(GE_SO)
+  remove(sc)
+  remove(filtered_data)
+  remove(raw_data)
+  remove(out)
+  gc()
+  
+  #Assign Hashtag Assay
+  if(is.list(TenX)){
+    
+    
+    #Exclude ADT data
+    matched_string <- grep("Hashtag_\\d+", row.names(AC), value = TRUE)
+    AC <- AC[matched_string,]
+    row.names(AC) <- gsub("_TotalseqB", "", row.names(AC))
+    
+    SoupOut[["HTO"]] <- CreateAssayObject(counts = AC)
+    
+    # Normalize HTO data, here we use centered log-ratio (CLR) transformation
+    HashtaggedData <- NormalizeData(SoupOut, assay = "HTO", normalization.method = "CLR")
+    
+    #Clean Up
+    remove(SoupOut)
+    remove(AC)
+    remove(GE)
+    gc()
+    
+    
+    #Demultiplex Data, Visualize
+    HashtaggedData <- HTODemux(HashtaggedData, assay = "HTO", positive.quantile = 0.99)
+    table(HashtaggedData$HTO_classification.global)
+    Idents(HashtaggedData) <- "HTO_maxID"
+    
+    hash_features <- rownames(HashtaggedData[["HTO"]])
+    # Generate the RidgePlot
+    plot <- RidgePlot(HashtaggedData, assay = "HTO", features = hash_features, ncol = 2)
+    
+    # Save the plot
+    ggsave(filename = paste0(subdirectory,'RidgePlot_HashtaggedData.png'), plot = plot)
+    
+    Idents(HashtaggedData) <- "HTO_classification.global"
+    
+    # Generate the ViolinPlot
+    plot <- VlnPlot(HashtaggedData, features = "nCount_RNA", pt.size = 0.1, log = TRUE)
+    
+    # Save the plot
+    ggsave(filename = paste0(subdirectory,'ViolinPlot_HashtaggedData.png'), plot = plot)
+    
+    
+    #Define mitochondrial features
+    HashtaggedData[["percent.mt"]] <- PercentageFeatureSet(HashtaggedData, pattern = "^MT-")
+    
+    # Plot histogram to examine percent mitochondrial
+    png(paste0(subdirectory,'Mitodist_HashtaggedData.png'))
+    hist(HashtaggedData$percent.mt, breaks=500, main="Distribution of Mitochondrial RNA Percentage", 
+         xlab="Percentage of Mitochondrial RNA", ylab="Number of Cells", col="skyblue", xlim=c(0, 20))
+    dev.off()
+    
+    if(remove_ribo == T){
+      # List of prefixes for ribosomal genes
+      ribosomal_prefixes <- c("RPL", "RPS", "MRPL", "MRPS")
+      
+      # Identify genes that start with ribosomal prefixes
+      ribosomal_genes <- grep(paste0("^", paste(ribosomal_prefixes, collapse="|")), rownames(HashtaggedData@assays$RNA$counts), value=TRUE)
+      
+      # Remove ribosomal genes from the Seurat object
+      MitoCutNoRibo_Out <- HashtaggedData[setdiff(rownames(HashtaggedData), ribosomal_genes), ]
+      
+      
+      #Save and Benchmark
+      
+      benchmark_seurat_data(MitoCutNoRibo_Out, subdirectory)
+      save_to_objects_folder(MitoCutNoRibo_Out, "MitoCutNoRibo_Out", subdirectory)
+      SaveSeuMetadata(MitoCutNoRibo_Out, "MitoCutNoRibo_Out", subdirectory)
+      
+    }else{
+      
+      
+      #Save and Benchmark
+      
+      benchmark_seurat_data(MitoCutNoRibo_Out, subdirectory)
+      save_to_objects_folder(MitoCutNoRibo_Out, "MitoCutNoRibo_Out", subdirectory)
+      SaveSeuMetadata(MitoCutNoRibo_Out, "MitoCutNoRibo_Out", subdirectory)
+    }
+    
+  }else{
+    #Jump straight to mito/ribosomal filtering step if no HTO
+    HashtaggedData <- SoupOut
+    
+    #Define mitochondrial features
+    HashtaggedData[["percent.mt"]] <- PercentageFeatureSet(HashtaggedData, pattern = "^MT-")
+    
+    # Plot histogram to examine percent mitochondrial
+    png(paste0(subdirectory,'Mitodist_HashtaggedData.png'))
+    hist(HashtaggedData$percent.mt, breaks=500, main="Distribution of Mitochondrial RNA Percentage", 
+         xlab="Percentage of Mitochondrial RNA", ylab="Number of Cells", col="skyblue", xlim=c(0, 20))
+    dev.off()
+    
+    if(remove_ribo == T){
+      # List of prefixes for ribosomal genes
+      ribosomal_prefixes <- c("RPL", "RPS", "MRPL", "MRPS")
+      
+      # Identify genes that start with ribosomal prefixes
+      ribosomal_genes <- grep(paste0("^", paste(ribosomal_prefixes, collapse="|")), rownames(HashtaggedData@assays$RNA$counts), value=TRUE)
+      
+      # Remove ribosomal genes from the Seurat object
+      MitoCutNoRibo_Out <- HashtaggedData[setdiff(rownames(HashtaggedData), ribosomal_genes), ]
+      
+      
+      #Save and Benchmark
+      
+      benchmark_seurat_data(MitoCutNoRibo_Out, subdirectory)
+      save_to_objects_folder(MitoCutNoRibo_Out, "MitoCutNoRibo_Out", subdirectory)
+      SaveSeuMetadata(MitoCutNoRibo_Out, "MitoCutNoRibo_Out", subdirectory)
+    } else{
+      
+      #Save and Benchmark
+      
+      benchmark_seurat_data(MitoCutNoRibo_Out, subdirectory)
+      save_to_objects_folder(MitoCutNoRibo_Out, "MitoCutNoRibo_Out", subdirectory)
+      SaveSeuMetadata(MitoCutNoRibo_Out, "MitoCutNoRibo_Out", subdirectory)
+    }  
+    
+  }
+  
+  #Cleanup
+  remove(HashtaggedData)
+  remove(TenX)
+  
+  gc()
+  
+}
+
+
+FilterGenes <- function(seu_obj, n_genes_filtered, results_folder, subdirectory){
+  
+  temp_str <- gsub(".*?(sample+)", "\\1", subdirectory)
+  i <- gsub(".*?([0-9]+).*", "\\1", temp_str)
+  # Read RDS
+  seu <- readRDS(paste0(results_folder,"sample_",i,'/','soup/', seu_obj))
+  
+  message(paste("Filtering genes in sample", i))
+  # Remove genes found in 10 cells or fewer
+  sub_features <- rowSums(seu@assays$RNA$counts > 0) > n_genes_filtered
+  sub_features <- sub_features[sub_features == T]
+  GeneFiltered <- subset(seu, features = names(sub_features))
+  
+  
+  #Save and Benchmark
+  benchmark_seurat_data(GeneFiltered, subdirectory)
+  save_to_objects_folder(GeneFiltered, "GeneFiltered", subdirectory)
+  
+  #Clean up
+  remove(seu_obj)
+  gc()
+  
+  #QC by number of genes and number of UMIs
+  plot1 <- VlnPlot(GeneFiltered, features = "nFeature_RNA")
+  plot2 <- VlnPlot(GeneFiltered, features = "nCount_RNA")
+  plot3 <- VlnPlot(GeneFiltered, features = "percent.mt")
+  
+  # Save the plot
+  ggsave(filename = paste0(subdirectory,"ViolinPlotUMIs_GeneFiltered.png"), plot = plot1)
+  ggsave(filename = paste0(subdirectory,'ViolinPlotGenes_GeneFiltered.png'), plot = plot2)
+  ggsave(filename = paste0(subdirectory,'MTpercent_GeneFiltered.png'), plot = plot3)
+  
+}
+ 
+FilterCells <- function(seu_obj, results_folder, subdirectory){
+  
+  temp_str <- gsub(".*?(sample+)", "\\1", subdirectory)
+  i <- gsub(".*?([0-9]+).*", "\\1", temp_str)
+  # Read RDS
+  GeneFiltered <- readRDS(paste0(results_folder,"sample_",i,'/','filtering/', seu_obj))
+  
+  message(paste0("filtering sample ", i))
+  message("nfeature lower ?")
+  nfeature_lower = readline();
+  nfeature_lower = as.integer(nfeature_lower)
+  message("nfeature upper ?")
+  nfeature_upper = readline();
+  nfeature_upper = as.integer(nfeature_upper)
+  message("ncount lower ?")
+  ncount_lower = readline();
+  ncount_lower = as.integer(ncount_lower)
+  message("ncount upper ?")
+  ncount_upper = readline();
+  ncount_upper = as.integer(ncount_upper)
+  message("percent mt upper ?")
+  percent_mt = readline();
+  percent_mt = as.integer(percent_mt)
+  
+  CellFiltered <- subset(GeneFiltered, subset = nFeature_RNA >= nfeature_lower & nFeature_RNA <= nfeature_upper)
+  CellFiltered <- subset(CellFiltered, subset = nCount_RNA >= ncount_lower & nCount_RNA <= ncount_upper)
+  CellFiltered <- subset(CellFiltered, subset = percent.mt <= percent_mt)
+                           
+  plot1 <- VlnPlot(CellFiltered, features = "nFeature_RNA")
+  plot2 <- VlnPlot(CellFiltered, features = "nCount_RNA")
+  plot3 <- VlnPlot(CellFiltered, features = "percent.mt")
+  # Save the plot
+  ggsave(filename = paste0(subdirectory,"ViolinPlotUMIs_CellFiltered.png"), plot = plot1)
+  ggsave(filename = paste0(subdirectory,'ViolinPlotGenes_CellFiltered.png'), plot = plot2)
+  ggsave(filename = paste0(subdirectory,'PercentMt_CellFiltered.png'), plot = plot3)
+  
+  SaveSeuMetadata(CellFiltered, "CellFiltered", subdirectory)
+  save_to_objects_folder(CellFiltered,"CellFiltered", subdirectory)
+  benchmark_seurat_data(CellFiltered, subdirectory)
+}
+
+RemoveNegDrops <- function(seu_obj, results_folder, subdirectory){
+      #create index
+      temp_str <- gsub(".*?(sample+)", "\\1", subdirectory)
+      i <- gsub(".*?([0-9]+).*", "\\1", temp_str)
+      
+      CellFiltered <- readRDS(paste0(results_folder,"sample_",i,'/','filtering/', seu_obj))
+      # Filter out 'Negative' droplets
+      NoNegativeDrops <- subset(CellFiltered, subset = HTO_classification.global != "Negative")
+      
+      Idents(NoNegativeDrops) <- "HTO_classification.global"
+      plot <- VlnPlot(NoNegativeDrops, features = "nCount_RNA", pt.size = 0.1, log = TRUE)
+      
+      # Save the plot
+      ggsave(filename = "NoNegativeDrops.png", path = subdirectory, plot = plot)
+      
+      #Benchmark and Save Object
+      benchmark_seurat_data(NoNegativeDrops, subdirectory)
+      save_to_objects_folder(NoNegativeDrops, "NoNegativeDrops", subdirectory)
+}
+
+RunDF <- function(seu_obj, results_folder, subdirectory){
+
+  temp_str <- gsub(".*?(sample+)", "\\1", subdirectory)
+  i <- gsub(".*?([0-9]+).*", "\\1", temp_str)
+  seu_obj <- readRDS(paste0(results_folder,"sample_",i,'/','filtering/', seu_obj))
+  message(paste0("Running DoubletFinder for sample ", i))
+  
+  #Define Ground Truth
+  GT <- seu_obj@meta.data$HTO_classification.global
+
+
+  #Preprocess for DoubletFInder
+  # Preprocess for DoubletFinder
+  NoNegativeDrops <- seu_obj %>%
+    SCTransform(vst.flavor = "v2") %>%
+    RunPCA()
+
+  elbow_points <- find_elbow(NoNegativeDrops)
+
+  NoNegativeDrops <- NoNegativeDrops %>%
+    FindNeighbors(dims = 1:elbow_points) %>%
+    FindClusters(res = 0.2) %>%
+    RunUMAP(dims = 1:elbow_points)
+
+
+  # Sweep Parameters for ideal pK
+
+  #Redefine the Paramsweep function to remove 10K cell limit
+  paramSweep_v3_NoLimit <- function(seu_obj, PCs=1:10, sct = FALSE, num.cores=1) {
+    require(Seurat); require(fields);
+    ## Set pN-pK param sweep ranges
+    pK <- c(0.0005, 0.001, 0.005, seq(0.01,0.3,by=0.01))
+    pN <- seq(0.05,0.3,by=0.05)
+
+    ## Remove pK values with too few cells
+    min.cells <- round(nrow(seu_obj@meta.data)/(1-0.05) - nrow(seu_obj@meta.data))
+    pK.test <- round(pK*min.cells)
+    pK <- pK[which(pK.test >= 1)]
+
+    ## Extract pre-processing parameters from original data analysis workflow
+    orig.commands <- seu_obj@commands
+
+    ## Down-sample cells to 90000 (when applicable) for computational effiency
+    if (nrow(seu_obj@meta.data) > 90000) {
+      real.cells <- rownames(seu_obj@meta.data)[sample(1:nrow(seu_obj@meta.data), 90000, replace=FALSE)]
+      data <- seu_obj@assays$RNA$counts[ , real.cells]
+      n.real.cells <- ncol(data)
+    }
+
+    if (nrow(seu_obj@meta.data) <= 90000){
+      real.cells <- rownames(seu_obj@meta.data)
+      data <- seu_obj@assays$RNA$counts
+      n.real.cells <- ncol(data)
+    }
+
+    ## Iterate through pN, computing pANN vectors at varying pK
+    #no_cores <- detectCores()-1
+    if(num.cores>1){
+      require(parallel)
+      cl <- makeCluster(num.cores)
+      output2 <- mclapply(as.list(1:length(pN)),
+                          FUN = parallel_paramSweep_v3,
+                          n.real.cells,
+                          real.cells,
+                          pK,
+                          pN,
+                          data,
+                          orig.commands,
+                          PCs,
+                          sct,mc.cores=num.cores)
+      stopCluster(cl)
+    }else{
+      output2 <- lapply(as.list(1:length(pN)),
+                        FUN = parallel_paramSweep_v3,
+                        n.real.cells,
+                        real.cells,
+                        pK,
+                        pN,
+                        data,
+                        orig.commands,
+                        PCs,
+                        sct)
+    }
+
+    ## Write parallelized output into list
+    sweep.res.list <- list()
+    list.ind <- 0
+    for(i in 1:length(output2)){
+      for(j in 1:length(output2[[i]])){
+        list.ind <- list.ind + 1
+        sweep.res.list[[list.ind]] <- output2[[i]][[j]]
+      }
+    }
+
+    ## Assign names to list of results
+    name.vec <- NULL
+    for (j in 1:length(pN)) {
+      name.vec <- c(name.vec, paste("pN", pN[j], "pK", pK, sep = "_" ))
+    }
+    names(sweep.res.list) <- name.vec
+    return(sweep.res.list)
+
+  }
+
+  sweep.res.list_NoNegativeDrops <- paramSweep_v3_NoLimit(NoNegativeDrops, PCs = 1:elbow_points, sct = TRUE)
+  #test_param <- paramSweep_v3_NoLimit(NoNegativeDrops, PCs = 1:elbow_points, sct = TRUE)
+  sweep.stats_NoNegativeDrops <- summarizeSweep(sweep.res.list_NoNegativeDrops, GT = TRUE, GT.calls = GT)
+  bcmvn_NoNegativeDrops <- find.pK(sweep.stats_NoNegativeDrops)
+  write.csv(paste0(subdirectory, "bcmvn"))
+  message("Inspect bcmvn graph and table. report pK value ? : ")
+  
+
+  pK_value = readline();
+  pK_value = as.integer(pK_value)
+  pK_value <- 0.16
+
+  ## Homotypic Doublet Proportion Estimate -------------------------------------------------------------------------------------
+  homotypic_prop <- modelHomotypic(NoNegativeDrops@meta.data$seurat_clusters)           ## ex: annotations <- seu_kidney@meta.data$ClusteringResults
+  # n_cells <- length(NoNegativeDrops@meta.data[["orig.ident"]])
+  # n_cells <- 17000/nhashtags
+  nExp_poi <- (0.24*nrow(NoNegativeDrops@meta.data))
+  nExp_poi.adj <- round(nExp_poi*(1-homotypic_prop))
+
+  #DoubletsFound <- safety_clone
+
+  ## Run DoubletFinder with varying classification stringencies ----------------------------------------------------------------
+  DoubletsFound <- doubletFinder_v3(NoNegativeDrops, PCs = 1:elbow_points, pN = 0.25, pK = pK_value, nExp = nExp_poi.adj, reuse.pANN = FALSE, sct = TRUE)
+  table(DoubletsFound$HTO_classification.global, DoubletsFound$DF.classifications_0.25_0.16_0)
+  DoubletsFound$"DF.classifications*."
+  write.csv(paste0(subdirectory, "HTOvsDFannotations.csv"))
+  # Filter out 'Negative' droplets
+  DoubletsFound <- subset(DoubletsFound, subset = DF.classifications_0.25_0.16_511 == "Singlet")
+  #DoubletsFound <- subset(DoubletsFound, subset = HTO_classification.global == 'Singlet')
+
+  #Benchmark and Save Object
+  benchmark_seurat_data(DoubletsFound, subdirectory)
+  save_to_objects_folder(DoubletsFound, "DoubletsFound", subdirectory)
+  SaveSeuMetadata(DoubletsFound, "DoubletsFound", subdirectory)
+
+  remove(NoNegativeDrops)
+  remove(sweep.res.list_NoNegativeDrops)
+  gc()
+
+  table(DoubletsFound@meta.data$HTO_classification)
+
+
+  safety_clone <- DoubletsFound
+
+  # Extract unique identities from the metadata
+  unique_identities <- unique(DoubletsFound@meta.data$HTO_classification)
+
+  # Create a list of Seurat objects for each identity
+  subsetted_dataframes_singlets <- lapply(unique_identities, function(id) {
+    subset(DoubletsFound, subset = HTO_classification == id)
+  })
+
+  # Name each item in the list for clarity
+  names(subsetted_dataframes_singlets) <- unique_identities
+
+  #Benchmark and Save Object
+  save_to_objects_folder(subsetted_dataframes_singlets, "subsetted_dataframes_singlets", subdirectory)
+  SaveSeuMetadata(subsetted_dataframes_singlets, "subsetted_dataframes_singlets",subdirectory)
+  benchmark_seurat_data(subsetted_dataframes_singlets, subdirectory)
+
+}
+
+
+
+```
