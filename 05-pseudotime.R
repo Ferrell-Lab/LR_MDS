@@ -172,6 +172,20 @@ table(cl)
 MDSGenes_sub <- names(cl)[cl == "2"]
 cat(MDSGenes_sub, sep = '\n')
 
+#association test ----
+sce <- fitGAM(counts = counts,
+              pseudotime = pseudotime,
+              genes = LASSO,
+              parallel = T, BPPARAM = snow,
+              cellWeights = cellWeights)
+
+rowData(sce)$assocRes <- associationTest(sce, lineages = TRUE, l2fc = log2(2))
+assocRes <- rowData(sce)$assocRes
+
+assocGenes <- rownames(assocRes)[
+  which(p.adjust(assocRes$pvalue_1, "fdr") <= 0.05)
+]
+length(assocGenes)
 
 #gene-wise expression plots across pseudotime
 for(i in 1:length(conditionGenes)){

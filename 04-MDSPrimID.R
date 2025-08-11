@@ -536,7 +536,7 @@ excluded_genes <- LASSO_names[!LASSO_names %in% rownames(data_MDS)]
 GeneName_min <- GeneName_min[!GeneName_min %in% excluded_genes]
 
 x2.train<-as.data.frame(xtrain)
-x3.train<-(dplyr::select(x2.train, GeneName_min)) # select the expression data according to important Gene name
+x3.train<-(dplyr::select(x2.train, GeneName_min))
 x4.train <-as.matrix(x3.train)
 
 
@@ -547,8 +547,8 @@ LASSO_model <- glmnet(x4.train, ytrain, alpha = 1, family = "binomial",
 #run validation and calculate ROC curve
 x2.test<-as.data.frame(t(data_MDS))
 x2.test <- x2.test[,GeneName_min %in% colnames(x2.test)]
-x3.test<-(dplyr::select(x2.test, GeneName_min)) # select the expression data according to important Gene name
-x4.test <-as.matrix(x3.test) # for cv.glmnet, data should be in matrix (not in data frame)
+x3.test<-(dplyr::select(x2.test, GeneName_min)) 
+x4.test <-as.matrix(x3.test)
 
 predict_probability_selectedgene <- predict(LASSO_model,  type = "response", s=best_lambda, newx=x4.test)
 rocobj<-roc(ytest,predict_probability_selectedgene)
@@ -576,6 +576,7 @@ metadata_MDS <- readxl::read_excel(paste0(dir, 'data/MDS_bulk/NIHMS1508337-suppl
 
 #filter by IPSS Low
 metadata_MDS <- metadata_MDS %>% filter(IPSS %in% c("Low", "Int-1"))
+
 metadata_MDS$`Dendrogram branch Fig 1` <- paste0('MDS', metadata_MDS$`Dendrogram branch Fig 1`) 
 
 MDS_IDs <- data_MDS %>% dplyr::select(metadata_MDS$`Dendrogram branch Fig 1`)  %>% colnames()
@@ -627,9 +628,106 @@ ggplot(res_df, aes(x = log2FoldChange, y = -log10(padj), color = significant)) +
                arrow = arrow(type = "closed"), color = "black", size = 1.5)+
   geom_segment(aes(x = -2, y = 15, xend = -8, yend = 15),
                arrow = arrow(type = "closed"), color = "black", size = 1.5)+
-  labs(subtitle = "CD34+ cells from Im et al., 2019")+
+  #labs(subtitle = "CD34+ cells from Im et al., 2019")+
   annotate("text", label = "HD", x = -5, y = 16)+
   annotate("text", label = "LR-MDS", x = 5, y = 16)+
   theme(axis.text=element_text(size=11, color='black'))
 
 ggsave(filename = paste0(dir,"mds_validation.png"), dpi = 600, height = 3, width = 4)
+
+#SSGSEA ----
+library(matrixStats)
+library(data.table)
+dir <- "C:/Users/bhatp3/OneDrive - Vanderbilt/2023_MDS_BM_scRNAseq/"
+
+data_MDS <- read.csv(paste0(dir, 'data/MDS_bulk/GSE111085_MDS_isoform_fpkm_hgnc.txt'), header = T, row.names = 1)
+metadata_MDS <- readxl::read_excel(paste0(dir, 'data/MDS_bulk/NIHMS1508337-supplement-Supp3.xlsx'))
+LASSO_names <- read.csv(paste0(dir,'results/Pawan/LASS0_genes.csv'))[,2]
+LASSO_names <- LASSO_names[!LASSO_names == "EEF1G"] #remove genes with HD coefficient
+
+#split dataset into IPSS Low vs. high
+metadata_MDS_low <- metadata_MDS %>% filter(IPSS %in% c("Low", "Int-1"))
+metadata_MDS_high <- metadata_MDS %>% filter(IPSS %in% c("High", "Int-2"))
+
+metadata_MDS_low$`Dendrogram branch Fig 1` <- paste0('MDS', metadata_MDS_low$`Dendrogram branch Fig 1`) 
+metadata_MDS_high$`Dendrogram branch Fig 1` <- paste0('MDS', metadata_MDS_high$`Dendrogram branch Fig 1`)
+MDS_IDs_low <- data_MDS %>% dplyr::select(metadata_MDS_low$`Dendrogram branch Fig 1`)  %>% colnames()
+MDS_IDs_high <- data_MDS %>% dplyr::select(metadata_MDS_high$`Dendrogram branch Fig 1`)  %>% colnames()
+HD_IDs <- c("MDS33", "MDS44", "MDS45", "MDS46", paste0("MDS", seq(49,67)))
+
+data_MDS <- as.matrix(data_MDS)
+MDSPrimID <- LASSO_names
+gene_sets <- as.list(as.data.frame(MDSPrimID))
+
+res <- ssgsea(data_MDS, gene_sets, scale = TRUE, norm = FALSE)
+res1 <- as.data.frame(t(res)) 
+
+res1$sample <- rownames(res1)
+res1 <- res1 %>% mutate('IPSS-R Risk' = case_when(
+                           res1$sample %in% MDS_IDs_high ~ "Higher risk", 
+                           res1$sample %in% MDS_IDs_low ~ "Lower risk")) %>% na.omit()
+
+library(ggpubr)
+ggplot(res1, aes(x = res1$'IPSS-R Risk', y = MDSPrimID, color = res1$'IPSS-R Risk')) +
+  geom_boxplot() + 
+  geom_point(position = 'jitter')+
+  labs(title = "ssGSEA on MDS bulk RNA-seq samples", caption = "Higher risk n = 18, Lower risk n = 26") +
+  ylab("MDSPrimID ssGSEA score")+
+  xlab('IPSS-R Risk')+
+  stat_compare_means()+
+  theme_bw()+
+  theme(legend.position = 'none',
+        axis.text = element_text(color = 'black'),
+        title = element_text(size = 9))
+
+ssgsea = function(X, gene_sets, alpha = 0.25, scale = T, norm = F, single = T) {
+  row_names = rownames(X)
+  num_genes = nrow(X)
+  gene_sets = lapply(gene_sets, function(genes) {which(row_names %in% genes)})
+  
+  # Ranks for genes
+  R = matrixStats::colRanks(X, preserveShape = T, ties.method = 'average')
+  
+  # Calculate enrichment score (es) for each sample (column)
+  es = apply(R, 2, function(R_col) {
+    gene_ranks = order(R_col, decreasing = TRUE)
+    
+    # Calc es for each gene set
+    es_sample = sapply(gene_sets, function(gene_set_idx) {
+      # pos: match (within the gene set)
+      # neg: non-match (outside the gene set)
+      indicator_pos = gene_ranks %in% gene_set_idx
+      indicator_neg = !indicator_pos
+      
+      rank_alpha  = (R_col[gene_ranks] * indicator_pos) ^ alpha
+      
+      step_cdf_pos = cumsum(rank_alpha)    / sum(rank_alpha)
+      step_cdf_neg = cumsum(indicator_neg) / sum(indicator_neg)
+      
+      step_cdf_diff = step_cdf_pos - step_cdf_neg
+      
+      # Normalize by gene number
+      if (scale) step_cdf_diff = step_cdf_diff / num_genes
+      
+      # Use ssGSEA or not
+      if (single) {
+        sum(step_cdf_diff)
+      } else {
+        step_cdf_diff[which.max(abs(step_cdf_diff))]
+      }
+    })
+    unlist(es_sample)
+  })
+  
+  if (length(gene_sets) == 1) es = matrix(es, nrow = 1)
+  
+  # Normalize by absolute diff between max and min
+  if (norm) es = es / diff(range(es))
+  
+  # Prepare output
+  rownames(es) = names(gene_sets)
+  colnames(es) = colnames(X)
+  return(es)
+}
+
+

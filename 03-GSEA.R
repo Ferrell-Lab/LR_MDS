@@ -152,3 +152,86 @@ dotplot_DE <- ggplot() +
 dotplot_DE
 
 ggsave(paste0(dir,"gsea_dotplot.svg"), units = "in", height = 4, width = 8)
+
+
+#SSGSEA----
+#adapted from https://rpubs.com/pranali018/SSGSEA
+seu <- subset(seu, subset = cell_annos == "HSPC")
+pseudo_seu <- AggregateExpression(seu, assays = "RNA", return.seurat = T, group.by = c("Disease", "Specimen_ID"))
+pseudo_seu@meta.data
+
+MDSPrimID <- read.csv(paste0(dir,'results/Pawan/LASS0_genes.csv'))[,2]
+gene_sets <- as.list(as.data.frame(MDSPrimID))
+
+res <- ssgsea(pseudo_seu@assays$RNA$data, gene_sets, scale = TRUE, norm = FALSE)
+res1 <- as.data.frame(t(res)) 
+
+res1$sample <- rownames(res1)
+apply(res1$sample, )
+res1$Disease <- unlist(lapply(res1$sample,FUN = function(x){gsub(x = x, "_.*","")}))
+
+
+library(ggpubr)
+ggplot(res1, aes( x = sample, y = MDSPrimID, fill = Disease)) +
+  geom_bar(stat = "identity") + 
+  labs(title = "ssGSEA on MDS scRNA-seq samples") +
+  ylab("MDSPrimID ssGSEA score")+
+  scale_fill_manual(values = c("grey","firebrick"))+
+  xlab(NULL)+
+  theme_bw()+
+  theme(legend.position = 'none',
+        axis.text = element_text(color = 'black'),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        title = element_text(size = 9))
+
+ssgsea = function(X, gene_sets, alpha = 0.25, scale = T, norm = F, single = T) {
+  row_names = rownames(X)
+  num_genes = nrow(X)
+  gene_sets = lapply(gene_sets, function(genes) {which(row_names %in% genes)})
+  
+  # Ranks for genes
+  R = matrixStats::colRanks(X, preserveShape = T, ties.method = 'average')
+  
+  # Calculate enrichment score (es) for each sample (column)
+  es = apply(R, 2, function(R_col) {
+    gene_ranks = order(R_col, decreasing = TRUE)
+    
+    # Calc es for each gene set
+    es_sample = sapply(gene_sets, function(gene_set_idx) {
+      # pos: match (within the gene set)
+      # neg: non-match (outside the gene set)
+      indicator_pos = gene_ranks %in% gene_set_idx
+      indicator_neg = !indicator_pos
+      
+      rank_alpha  = (R_col[gene_ranks] * indicator_pos) ^ alpha
+      
+      step_cdf_pos = cumsum(rank_alpha)    / sum(rank_alpha)
+      step_cdf_neg = cumsum(indicator_neg) / sum(indicator_neg)
+      
+      step_cdf_diff = step_cdf_pos - step_cdf_neg
+      
+      # Normalize by gene number
+      if (scale) step_cdf_diff = step_cdf_diff / num_genes
+      
+      # Use ssGSEA or not
+      if (single) {
+        sum(step_cdf_diff)
+      } else {
+        step_cdf_diff[which.max(abs(step_cdf_diff))]
+      }
+    })
+    unlist(es_sample)
+  })
+  
+  if (length(gene_sets) == 1) es = matrix(es, nrow = 1)
+  
+  # Normalize by absolute diff between max and min
+  if (norm) es = es / diff(range(es))
+  
+  # Prepare output
+  rownames(es) = names(gene_sets)
+  colnames(es) = colnames(X)
+  return(es)
+}
+
+
